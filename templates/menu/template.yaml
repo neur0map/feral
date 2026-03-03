@@ -1,0 +1,7 @@
+name: Navigation Menu
+category: Menus
+description: Arrow-key menu that emits events on select
+outputs:
+  - start
+  - settings
+  - quit

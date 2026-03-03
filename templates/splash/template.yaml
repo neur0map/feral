@@ -1,0 +1,6 @@
+name: Splash Screen
+category: Splash Screens
+description: Centered title card with quit handler
+outputs:
+  - proceed
+  - quit

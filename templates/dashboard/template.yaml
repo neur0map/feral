@@ -1,0 +1,6 @@
+name: Dashboard
+category: Data Views
+description: Multi-panel data dashboard with styled UI
+outputs:
+  - quit
+  - refresh
