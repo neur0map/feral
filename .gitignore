@@ -29,3 +29,6 @@ src-tauri/gen/
 
 # Prowl snapshot cache
 .prowl/
+
+# Local docs
+docs/
