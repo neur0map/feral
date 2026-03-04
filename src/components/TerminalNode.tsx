@@ -10,42 +10,16 @@ import {
   Position,
   useReactFlow,
 } from "@xyflow/react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import CodeMirror from "@uiw/react-codemirror";
 import { go } from "@codemirror/lang-go";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { search } from "@codemirror/search";
+import { createTerminal, createWriteCoalescer, disposeTerminal } from "@/lib/terminal";
 import "@xterm/xterm/css/xterm.css";
-
-// ── Xterm theme ─────────────────────────────────────────────────────────────
-
-const XTERM_THEME = {
-  background: "#121213",
-  foreground: "#d4d4d8",
-  cursor: "#d4d4d8",
-  cursorAccent: "#121213",
-  selectionBackground: "rgba(255, 255, 255, 0.15)",
-  selectionForeground: "#ffffff",
-  black: "#1a1a1c",
-  red: "#f87171",
-  green: "#4ade80",
-  yellow: "#fbbf24",
-  blue: "#60a5fa",
-  magenta: "#c084fc",
-  cyan: "#22d3ee",
-  white: "#d4d4d8",
-  brightBlack: "#3f3f44",
-  brightRed: "#fca5a5",
-  brightGreen: "#86efac",
-  brightYellow: "#fde68a",
-  brightBlue: "#93c5fd",
-  brightMagenta: "#d8b4fe",
-  brightCyan: "#67e8f9",
-  brightWhite: "#fafafa",
-};
 
 // ── Component ───────────────────────────────────────────────────────────────
 
@@ -54,6 +28,7 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
   const screenName = (nodeData.screenName as string) ?? "splash";
   const templateId = (nodeData.templateId as string) ?? "splash";
   const outputs = (nodeData.outputs as string[]) ?? [];
+  const framework = (nodeData.framework as string) ?? "charm";
 
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -159,6 +134,16 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
     [id, setEdges]
   );
 
+  // ── Stable refs for callbacks used inside the main effect ─────────────
+  // The main terminal effect must ONLY depend on `id`. If it depends on
+  // derived callbacks (flashEdge, fitAndResize), any instability in their
+  // dependencies (e.g. setEdges from useReactFlow() getting a new reference
+  // on re-render) causes the effect to re-run — which kills the PTY,
+  // disposes the terminal, recompiles the Go binary, and causes visible
+  // flicker. Using refs breaks this dependency chain.
+  const flashEdgeRef = useRef(flashEdge);
+  flashEdgeRef.current = flashEdge;
+
   // ── Main effect: wire up xterm + PTY ──────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
@@ -166,20 +151,7 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
     setExited(false);
     setLastEvent(null);
 
-    const term = new Terminal({
-      theme: XTERM_THEME,
-      fontSize: 13,
-      fontFamily: '"SF Mono", Menlo, Monaco, "Courier New", monospace',
-      lineHeight: 1.2,
-      cursorBlink: true,
-      cursorStyle: "bar",
-      allowProposedApi: true,
-      smoothScrollDuration: 100,
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerRef.current);
+    const { term, fitAddon } = createTerminal(containerRef.current, "screen");
 
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
@@ -188,20 +160,25 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
       fitAddon.fit();
     });
 
+    // Coalesced write: batches all Tauri events within a single rAF frame
+    // into one term.write() call, preventing mid-frame partial renders.
+    const coalescedWrite = createWriteCoalescer(term);
+
     // Compile and run
     term.write("\x1b[90mCompiling...\x1b[0m\r\n");
     invoke("install_and_run_screen", {
       screenName,
       templateId,
       nodeId: id,
+      frameworkStr: framework,
     }).catch((err) => {
       term.write(`\r\n\x1b[31m[Feral] Build failed: ${err}\x1b[0m\r\n`);
     });
 
-    // Listen for PTY output
+    // Listen for PTY output — uses coalesced writes to avoid flicker
     let unlistenOutput: UnlistenFn | null = null;
     listen<{ data: string }>(`terminal-output-${id}`, (event) => {
-      term.write(event.payload.data);
+      coalescedWrite(event.payload.data);
       // Detect "[process exited]" sentinel
       if (event.payload.data.includes("[process exited]")) {
         setExited(true);
@@ -225,7 +202,7 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
     listen<{ event: string }>(`terminal-event-${id}`, (event) => {
       const eventName = event.payload.event;
       setLastEvent(eventName);
-      flashEdge(eventName);
+      flashEdgeRef.current(eventName);
     }).then((fn) => {
       unlistenEvent = fn;
     });
@@ -277,9 +254,21 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
       invoke("write_to_terminal", { id, data }).catch(console.error);
     });
 
-    // ResizeObserver
+    // ResizeObserver — 150ms debounce to avoid SIGWINCH floods during layout.
+    // Pixel-dimension guard: skip fit() if container size hasn't actually changed,
+    // preventing a fit() → reflow → ResizeObserver → fit() feedback loop.
     let resizeTimeout: ReturnType<typeof setTimeout>;
-    const observer = new ResizeObserver(() => {
+    let lastPxW = 0;
+    let lastPxH = 0;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) {
+        const w = Math.round(rect.width);
+        const h = Math.round(rect.height);
+        if (w === lastPxW && h === lastPxH) return;
+        lastPxW = w;
+        lastPxH = h;
+      }
       clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
         fitAddon.fit();
@@ -288,7 +277,7 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
           lastDims.current = { cols, rows };
           invoke("resize_terminal", { id, cols, rows }).catch(console.error);
         }
-      }, 50);
+      }, 150);
     });
 
     if (containerRef.current) {
@@ -303,10 +292,11 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
       if (unlistenReload) unlistenReload();
       if (unlistenEvent) unlistenEvent();
       if (unlistenAiGen) unlistenAiGen();
-      term.dispose();
+      disposeTerminal(term);
       invoke("kill_terminal", { id }).catch(console.error);
     };
-  }, [id, fitAndResize, flashEdge]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks accessed via refs
+  }, [id]);
 
   // ── Refit xterm when editor panel toggles ─────────────────────────────
   useEffect(() => {
@@ -354,11 +344,12 @@ export function TerminalNode({ id, selected, data }: NodeProps) {
         screenName,
         templateId,
         nodeId: id,
+        frameworkStr: framework,
       });
     } catch (err) {
       term?.write(`\r\n\x1b[31m[Feral] Build failed: ${err}\x1b[0m\r\n`);
     }
-  }, [id, screenName, templateId]);
+  }, [id, screenName, templateId, framework]);
 
   // ── Click-to-focus handler ────────────────────────────────────────────
   const handleTerminalClick = useCallback(() => {

@@ -1,0 +1,6 @@
+name: Send Message
+category: Networking
+description: Demonstrates sending messages between models
+framework: charm
+outputs:
+  - quit

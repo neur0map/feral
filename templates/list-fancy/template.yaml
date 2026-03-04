@@ -1,0 +1,7 @@
+name: Fancy List
+category: Lists & Tables
+description: Fancy list with custom delegate styling
+framework: charm
+outputs:
+  - select
+  - quit

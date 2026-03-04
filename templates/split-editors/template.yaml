@@ -1,0 +1,6 @@
+name: Split Editors
+category: Layout
+description: Side-by-side text editors
+framework: charm
+outputs:
+  - quit

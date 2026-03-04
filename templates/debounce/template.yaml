@@ -1,0 +1,6 @@
+name: Debounce
+category: Patterns
+description: Debounced text input that delays processing
+framework: charm
+outputs:
+  - quit

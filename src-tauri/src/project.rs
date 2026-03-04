@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::framework::{self, Framework};
 use crate::{PtyState, WatcherState};
 
 // ── Assembly engine structs ─────────────────────────────────────────────────
@@ -27,12 +28,18 @@ struct AppEdge {
 
 // ── Template structs ────────────────────────────────────────────────────────
 
+fn default_charm_str() -> String {
+    "charm".to_string()
+}
+
 #[derive(Deserialize, Serialize)]
 struct TemplateYaml {
     name: String,
     category: String,
     description: String,
     outputs: Vec<String>,
+    #[serde(default = "default_charm_str")]
+    framework: String,
 }
 
 #[derive(Serialize)]
@@ -42,6 +49,13 @@ pub struct TemplateInfo {
     category: String,
     description: String,
     outputs: Vec<String>,
+    framework: String,
+}
+
+/// Converts a template/screen name into a valid Go identifier by stripping hyphens.
+/// "file-picker" → "filepicker", "list-default" → "listdefault", "simple" → "simple"
+fn go_ident(name: &str) -> String {
+    name.replace('-', "")
 }
 
 // ── Template helpers ────────────────────────────────────────────────────────
@@ -117,6 +131,7 @@ fn scan_templates(app: &AppHandle) -> Result<Vec<TemplateInfo>, String> {
             category: parsed.category,
             description: parsed.description,
             outputs: parsed.outputs,
+            framework: parsed.framework,
         });
     }
 
@@ -124,19 +139,29 @@ fn scan_templates(app: &AppHandle) -> Result<Vec<TemplateInfo>, String> {
     Ok(templates)
 }
 
-/// Reads the Go source file for a template: {id}/{id}.go
+/// Reads the Go source file for a template.
+/// Tries {id}.go first (hyphenated), then the Go-safe name {go_ident}.go.
 fn read_template_source(app: &AppHandle, template_id: &str) -> Result<String, String> {
     let templates_dir = resolve_templates_dir(app)?;
-    let go_file = templates_dir
-        .join(template_id)
-        .join(format!("{template_id}.go"));
+    let template_dir = templates_dir.join(template_id);
 
-    std::fs::read_to_string(&go_file)
-        .map_err(|e| format!("Failed to read template source {}: {e}", go_file.display()))
+    // Try exact match first: {template_id}.go (e.g., "simple.go")
+    let exact = template_dir.join(format!("{template_id}.go"));
+    if exact.exists() {
+        return std::fs::read_to_string(&exact)
+            .map_err(|e| format!("Failed to read template source {}: {e}", exact.display()));
+    }
+
+    // Fallback: Go-safe name (e.g., "file-picker" → "filepicker.go")
+    let safe = go_ident(template_id);
+    let fallback = template_dir.join(format!("{safe}.go"));
+    std::fs::read_to_string(&fallback)
+        .map_err(|e| format!("Failed to read template source {}: {e}", fallback.display()))
 }
 
 /// Copies all .go files from a template directory into the screen directory.
-/// Renames the package declaration from template_id to screen_name in each file.
+/// Handles hyphenated template IDs: the Go package name is the dehyphenated form.
+/// Renames the main .go file to {screen_name}.go and rewrites the package declaration.
 fn install_template_files(
     app: &AppHandle,
     template_id: &str,
@@ -146,6 +171,15 @@ fn install_template_files(
     let templates_dir = resolve_templates_dir(app)?;
     let template_dir = templates_dir.join(template_id);
 
+    // The Go package name in the source is the dehyphenated template ID
+    // e.g., "file-picker" → source declares "package filepicker"
+    let source_pkg = go_ident(template_id);
+    let dest_pkg = go_ident(screen_name);
+
+    // The main .go file could be named either way: {template_id}.go or {source_pkg}.go
+    let main_file_exact = format!("{template_id}.go");
+    let main_file_safe = format!("{source_pkg}.go");
+
     let entries = std::fs::read_dir(&template_dir)
         .map_err(|e| format!("Failed to read template dir: {e}"))?;
 
@@ -153,13 +187,13 @@ fn install_template_files(
         let path = entry.path();
         if path.extension().map_or(false, |ext| ext == "go") {
             let filename = entry.file_name();
-            let filename_str = filename.to_string_lossy();
+            let filename_str = filename.to_string_lossy().to_string();
 
-            // Determine destination filename: rename {template_id}.go → {screen_name}.go
-            let dest_name = if filename_str == format!("{template_id}.go") {
-                format!("{screen_name}.go")
+            // Rename main file to {screen_name}.go; keep others as-is
+            let dest_name = if filename_str == main_file_exact || filename_str == main_file_safe {
+                format!("{dest_pkg}.go")
             } else {
-                filename_str.to_string()
+                filename_str
             };
 
             let dest_path = screen_dir.join(&dest_name);
@@ -168,8 +202,8 @@ fn install_template_files(
             let content = std::fs::read_to_string(&path)
                 .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
             let fixed = content.replacen(
-                &format!("package {template_id}"),
-                &format!("package {screen_name}"),
+                &format!("package {source_pkg}"),
+                &format!("package {dest_pkg}"),
                 1,
             );
 
@@ -255,24 +289,8 @@ fn ensure_project(state: &ProjectState) -> Result<PathBuf, String> {
     // Write feralkit helper package
     let feralkit_path = root.join("feralkit").join("feralkit.go");
     if !feralkit_path.exists() {
-        std::fs::write(
-            &feralkit_path,
-            r#"package feralkit
-
-import tea "github.com/charmbracelet/bubbletea"
-
-// EventMsg is emitted by screens to signal navigation transitions.
-// The harness intercepts this, prints it to stderr for Feral to detect,
-// and exits the program.
-type EventMsg struct{ Name string }
-
-// EmitEvent returns a tea.Cmd that fires an EventMsg.
-func EmitEvent(name string) tea.Cmd {
-	return func() tea.Msg { return EventMsg{Name: name} }
-}
-"#,
-        )
-        .map_err(|e| format!("Failed to write feralkit: {e}"))?;
+        std::fs::write(&feralkit_path, framework::feralkit_source(Framework::Charm))
+            .map_err(|e| format!("Failed to write feralkit: {e}"))?;
     }
 
     // Initialize go module if go.mod doesn't exist
@@ -291,18 +309,21 @@ func EmitEvent(name string) tea.Cmd {
             ));
         }
 
-        // Explicitly add bubbletea dependency (avoids go mod tidy issues with dot-dirs)
-        let output = std::process::Command::new(&go_bin)
-            .args(["get", "github.com/charmbracelet/bubbletea@latest"])
-            .current_dir(&root)
-            .output()
-            .map_err(|e| format!("go get failed: {e}"))?;
+        // Explicitly add framework dependencies (avoids go mod tidy issues with dot-dirs)
+        for dep in framework::go_dependencies(Framework::Charm) {
+            let output = std::process::Command::new(&go_bin)
+                .args(["get", dep])
+                .current_dir(&root)
+                .output()
+                .map_err(|e| format!("go get failed: {e}"))?;
 
-        if !output.status.success() {
-            return Err(format!(
-                "go get bubbletea failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+            if !output.status.success() {
+                return Err(format!(
+                    "go get {} failed: {}",
+                    dep,
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
         }
     }
 
@@ -421,12 +442,17 @@ pub async fn install_and_run_screen(
     screen_name: String,
     template_id: String,
     node_id: String,
+    framework_str: Option<String>,
     app: AppHandle,
     pty_state: State<'_, PtyState>,
     project_state: State<'_, ProjectState>,
 ) -> Result<String, String> {
+    let fw = framework::from_str(framework_str.as_deref().unwrap_or("charm"));
     let root = ensure_project(&project_state)?;
     let go_bin = find_go_binary()?;
+
+    // Sanitize screen_name: strip hyphens so it's a valid Go identifier
+    let screen_name = go_ident(&screen_name);
 
     // Install template files: copy all .go files from template dir to screen dir
     // Skip if main screen file already exists (rehydration — preserves user edits on reload)
@@ -444,51 +470,7 @@ pub async fn install_and_run_screen(
     std::fs::create_dir_all(&harness_dir)
         .map_err(|e| format!("Failed to create harness dir: {e}"))?;
 
-    let harness_source = format!(
-        r#"package main
-
-import (
-	"fmt"
-	"os"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"{module}/feralkit"
-	"{module}/screens/{name}"
-)
-
-// wrapper intercepts feralkit.EventMsg before delegating to the screen.
-type wrapper struct {{
-	inner tea.Model
-}}
-
-func (w wrapper) Init() tea.Cmd {{
-	return w.inner.Init()
-}}
-
-func (w wrapper) Update(msg tea.Msg) (tea.Model, tea.Cmd) {{
-	if evt, ok := msg.(feralkit.EventMsg); ok {{
-		fmt.Fprintf(os.Stderr, "\n[feral:event:%s]\n", evt.Name)
-		return w, tea.Quit
-	}}
-	m, cmd := w.inner.Update(msg)
-	w.inner = m
-	return w, cmd
-}}
-
-func (w wrapper) View() string {{
-	return w.inner.View()
-}}
-
-func main() {{
-	p := tea.NewProgram(wrapper{{inner: {name}.New()}}, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {{
-		os.Exit(1)
-	}}
-}}
-"#,
-        module = "feral.dev/default",
-        name = screen_name,
-    );
+    let harness_source = framework::harness_source(fw, "feral.dev/default", &screen_name);
 
     let harness_file = harness_dir.join("main.go");
     std::fs::write(&harness_file, harness_source)
@@ -499,8 +481,10 @@ func main() {{
 
     // Spawn the compiled binary in a PTY
     let mut cmd = CommandBuilder::new(&binary_path);
-    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM", "tmux-256color");
     cmd.env("LANG", "en_US.UTF-8");
+    cmd.env("COLORFGBG", "15;0");
+    cmd.env("COLORTERM", "truecolor");
 
     crate::spawn_pty_with_command(node_id, cmd, &app, &pty_state)?;
 
@@ -526,6 +510,7 @@ pub async fn rebuild_and_reload_screen(
 ) -> Result<String, String> {
     let root = ensure_project(&project_state)?;
     let go_bin = find_go_binary()?;
+    let screen_name = go_ident(&screen_name);
 
     // Overwrite the screen source
     let screen_file = root
@@ -562,8 +547,10 @@ pub async fn rebuild_and_reload_screen(
 
     // Spawn the new binary
     let mut cmd = CommandBuilder::new(&binary_path);
-    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM", "tmux-256color");
     cmd.env("LANG", "en_US.UTF-8");
+    cmd.env("COLORFGBG", "15;0");
+    cmd.env("COLORTERM", "truecolor");
 
     crate::spawn_pty_with_command(node_id, cmd, &app, &pty_state)?;
 
@@ -591,9 +578,20 @@ fn to_pascal_case(s: &str) -> String {
 /// Generates the full-app `main.go` source from edges and a start screen.
 /// Reused by both `build_full_app` and `eject_project`.
 fn generate_full_app_source(edges: &[AppEdge], start_screen: &str, module_path: &str) -> String {
+    // Sanitize all screen names to valid Go identifiers
+    let start_screen = go_ident(start_screen);
+    let edges: Vec<AppEdge> = edges
+        .iter()
+        .map(|e| AppEdge {
+            source_screen: go_ident(&e.source_screen),
+            source_handle: e.source_handle.clone(),
+            target_screen: go_ident(&e.target_screen),
+        })
+        .collect();
+
     // Collect unique screen names (preserving order, start screen first)
     let mut screens: Vec<String> = vec![start_screen.to_string()];
-    for edge in edges {
+    for edge in &edges {
         if !screens.contains(&edge.source_screen) {
             screens.push(edge.source_screen.clone());
         }
@@ -634,7 +632,7 @@ fn generate_full_app_source(edges: &[AppEdge], start_screen: &str, module_path: 
     // Group route cases by source screen
     let mut route_by_source: std::collections::HashMap<String, Vec<(String, String)>> =
         std::collections::HashMap::new();
-    for edge in edges {
+    for edge in &edges {
         route_by_source
             .entry(edge.source_screen.clone())
             .or_default()
@@ -659,96 +657,16 @@ fn generate_full_app_source(edges: &[AppEdge], start_screen: &str, module_path: 
         }
     }
 
-    let start_pascal = to_pascal_case(start_screen);
+    let start_pascal = to_pascal_case(&start_screen);
 
-    format!(
-        r#"package main
-
-import (
-	"fmt"
-	"os"
-
-	tea "github.com/charmbracelet/bubbletea"
-{imports}
-	"{module_path}/feralkit"
-)
-
-type screenID int
-
-const (
-{enum_lines}
-)
-
-func newScreen(id screenID) tea.Model {{
-	switch id {{
-{new_screen_cases}
-	default:
-		fmt.Fprintf(os.Stderr, "unknown screen: %d\n", id)
-		os.Exit(1)
-		return nil
-	}}
-}}
-
-func route(from screenID, event string) (screenID, bool) {{
-	switch from {{
-{grouped_route_cases}
-	}}
-	return from, true
-}}
-
-type wrapper struct {{
-	inner tea.Model
-	event string
-}}
-
-func (w *wrapper) Init() tea.Cmd {{
-	return w.inner.Init()
-}}
-
-func (w *wrapper) Update(msg tea.Msg) (tea.Model, tea.Cmd) {{
-	if evt, ok := msg.(feralkit.EventMsg); ok {{
-		w.event = evt.Name
-		return w, tea.Quit
-	}}
-	m, cmd := w.inner.Update(msg)
-	w.inner = m
-	return w, cmd
-}}
-
-func (w *wrapper) View() string {{
-	return w.inner.View()
-}}
-
-func runScreen(m tea.Model) string {{
-	w := &wrapper{{inner: m}}
-	p := tea.NewProgram(w, tea.WithAltScreen())
-	finalModel, err := p.Run()
-	if err != nil {{
-		fmt.Fprintf(os.Stderr, "runtime error: %v\n", err)
-		os.Exit(1)
-	}}
-	return finalModel.(*wrapper).event
-}}
-
-func main() {{
-	current := screen{start_pascal}
-	for {{
-		m := newScreen(current)
-		event := runScreen(m)
-		next, quit := route(current, event)
-		if quit {{
-			break
-		}}
-		current = next
-	}}
-}}
-"#,
-        imports = imports.join("\n"),
-        enum_lines = enum_lines.join("\n"),
-        new_screen_cases = new_screen_cases.join("\n"),
-        grouped_route_cases = grouped_route_cases.join("\n"),
-        start_pascal = start_pascal,
-        module_path = module_path,
+    framework::full_app_template(
+        Framework::Charm,
+        &imports.join("\n"),
+        &enum_lines.join("\n"),
+        &new_screen_cases.join("\n"),
+        &grouped_route_cases.join("\n"),
+        &start_pascal,
+        module_path,
     )
 }
 
@@ -826,8 +744,10 @@ pub async fn build_full_app(
 
     // Spawn in PTY
     let mut cmd = CommandBuilder::new(&binary_path);
-    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM", "tmux-256color");
     cmd.env("LANG", "en_US.UTF-8");
+    cmd.env("COLORFGBG", "15;0");
+    cmd.env("COLORTERM", "truecolor");
 
     crate::spawn_pty_with_command(runner_node_id, cmd, &app, &pty_state)?;
 
@@ -998,6 +918,131 @@ pub async fn load_settings() -> Result<Option<String>, String> {
 
 // ── CoderNode helpers ─────────────────────────────────────────────────────────
 
+/// Generate the context prompt dynamically from what actually exists on disk.
+/// Reads the screen's Go files, feralkit source, and go.mod to build an accurate prompt.
+/// No hardcoded template rules — everything is derived from the real project state.
+fn coder_context_prompt(screen_name: &str, project_root: &std::path::Path) -> String {
+    let screen_dir = project_root.join("screens").join(screen_name);
+    let mut prompt = String::new();
+
+    prompt.push_str(&format!("# Feral Screen: {screen_name}\n\n"));
+
+    // ── Boundaries ────────────────────────────────────────────────────────
+    prompt.push_str("## Boundaries\n");
+    prompt.push_str(&format!(
+        "- ONLY modify files in: `{}`\n",
+        screen_dir.display()
+    ));
+    prompt.push_str("- Do NOT create `main.go` or `func main()` — Feral auto-generates a harness.\n");
+    prompt.push_str("- Do NOT modify files outside this directory.\n");
+    prompt.push_str(&format!(
+        "- This is a Go library (package `{screen_name}`), not a standalone binary.\n\n"
+    ));
+
+    // ── Current files in this screen ──────────────────────────────────────
+    prompt.push_str("## Current files\n```\n");
+    if let Ok(entries) = std::fs::read_dir(&screen_dir) {
+        let mut files: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.ends_with(".go") && !name.starts_with(".")
+            })
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            prompt.push_str("(no .go files yet)\n");
+        } else {
+            for f in &files {
+                prompt.push_str(&format!("{f}\n"));
+            }
+        }
+    } else {
+        prompt.push_str("(directory not found)\n");
+    }
+    prompt.push_str("```\n\n");
+
+    // ── Screen source (so the coder sees the existing code) ──────────────
+    let main_go = screen_dir.join(format!("{screen_name}.go"));
+    if main_go.exists() {
+        if let Ok(src) = std::fs::read_to_string(&main_go) {
+            prompt.push_str(&format!("## {screen_name}.go (current source)\n```go\n{src}\n```\n\n"));
+        }
+    }
+
+    // ── feralkit API (read from disk, not hardcoded) ─────────────────────
+    let feralkit_path = project_root.join("feralkit").join("feralkit.go");
+    if feralkit_path.exists() {
+        if let Ok(src) = std::fs::read_to_string(&feralkit_path) {
+            prompt.push_str("## feralkit API (read-only — do not modify)\n```go\n");
+            prompt.push_str(&src);
+            prompt.push_str("\n```\n\n");
+        }
+    }
+
+    // ── go.mod (so the coder knows the module path + available deps) ─────
+    let go_mod_path = project_root.join("go.mod");
+    if go_mod_path.exists() {
+        if let Ok(src) = std::fs::read_to_string(&go_mod_path) {
+            prompt.push_str("## go.mod\n```\n");
+            prompt.push_str(&src);
+            prompt.push_str("\n```\n\n");
+        }
+    }
+
+    // ── Project layout (derived from what directories actually exist) ────
+    prompt.push_str("## Project layout\n```\n");
+    prompt.push_str(&format!("{}/\n", project_root.display()));
+    let dirs = ["screens", "feralkit", ".harness", ".build"];
+    for d in &dirs {
+        let p = project_root.join(d);
+        if p.exists() {
+            let tag = match *d {
+                "screens"  => "screen packages",
+                "feralkit" => "shared event helper (read-only)",
+                ".harness" => "auto-generated runners (do not touch)",
+                ".build"   => "compiled binaries (do not touch)",
+                _ => "",
+            };
+            prompt.push_str(&format!("  {d}/  ← {tag}\n"));
+        }
+    }
+    if go_mod_path.exists() {
+        prompt.push_str("  go.mod\n");
+    }
+    prompt.push_str("```\n\n");
+
+    prompt.push_str("---\nThis is CONTEXT ONLY. Do NOT take any action. Do NOT modify, create, or analyze any files. Acknowledge with a single short sentence and wait for my instructions.\n");
+
+    prompt
+}
+
+/// Build the CLI command string to inject into the PTY for a given coder.
+fn build_coder_command(coder: &str, screen_name: &str) -> String {
+    match coder {
+        "claude"   => "claude\n".to_string(),
+        "codex"    => "codex\n".to_string(),
+        "gemini"   => format!(
+            "gemini -s \"Read CONTEXT.md for project rules. You are working on the '{screen_name}' screen.\"\n"
+        ),
+        "droid"    => "droid\n".to_string(),
+        "kilo"     => "kilo code\n".to_string(),
+        "opencode" => "opencode\n".to_string(),
+        other      => format!("{other}\n"),
+    }
+}
+
+/// Return the coder context prompt for a screen so the frontend can copy it.
+#[tauri::command]
+pub async fn get_coder_context(
+    screen_name: String,
+    project_state: State<'_, ProjectState>,
+) -> Result<String, String> {
+    let root = ensure_project(&project_state)?;
+    Ok(coder_context_prompt(&go_ident(&screen_name), &root))
+}
+
 /// Spawn a zsh shell in a screen's directory and inject a CLI coding assistant.
 /// Optionally starts a file watcher for hot-reload when `screen_node_id` is provided.
 #[tauri::command]
@@ -1005,22 +1050,32 @@ pub async fn spawn_coder_terminal(
     node_id: String,
     screen_name: String,
     screen_node_id: Option<String>,
+    coder_id: Option<String>,
     app: AppHandle,
     pty_state: State<'_, PtyState>,
     project_state: State<'_, ProjectState>,
     watcher_state: State<'_, WatcherState>,
 ) -> Result<(), String> {
     let root = ensure_project(&project_state)?;
+    let screen_name = go_ident(&screen_name);
     let screen_dir = root.join("screens").join(&screen_name);
     std::fs::create_dir_all(&screen_dir)
         .map_err(|e| format!("Failed to create screen dir: {e}"))?;
 
+    let coder = coder_id.as_deref().unwrap_or("claude");
+
     let mut cmd = CommandBuilder::new("zsh");
     cmd.cwd(&screen_dir);
-    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM", "tmux-256color");
     cmd.env("LANG", "en_US.UTF-8");
+    cmd.env("COLORFGBG", "15;0");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env_remove("npm_config_prefix"); // nvm compat: avoid "not compatible" warning
 
     crate::spawn_pty_with_command(node_id.clone(), cmd, &app, &pty_state)?;
+
+    // Build the CLI command to inject into the PTY
+    let cli_cmd = build_coder_command(coder, &screen_name);
 
     // Wait for shell to init, then inject CLI assistant launch
     std::thread::sleep(Duration::from_millis(500));
@@ -1031,7 +1086,7 @@ pub async fn spawn_coder_terminal(
             .map_err(|e| format!("Lock poisoned: {e}"))?;
         if let Some(term) = terminals.get_mut(&node_id) {
             term.writer
-                .write_all(b"claude\n")
+                .write_all(cli_cmd.as_bytes())
                 .map_err(|e| format!("Write failed: {e}"))?;
             term.writer
                 .flush()
@@ -1148,8 +1203,10 @@ fn start_screen_watcher(
 
                         // Spawn new binary
                         let mut cmd = CommandBuilder::new(&binary_path);
-                        cmd.env("TERM", "xterm-256color");
+                        cmd.env("TERM", "tmux-256color");
                         cmd.env("LANG", "en_US.UTF-8");
+                        cmd.env("COLORFGBG", "15;0");
+                        cmd.env("COLORTERM", "truecolor");
 
                         if let Err(e) = crate::spawn_pty_with_command(
                             screen_node_id.clone(),
@@ -1197,6 +1254,7 @@ pub async fn list_screen_files(
     project_state: State<'_, ProjectState>,
 ) -> Result<Vec<String>, String> {
     let root = ensure_project(&project_state)?;
+    let screen_name = go_ident(&screen_name);
     let screen_dir = root.join("screens").join(&screen_name);
 
     if !screen_dir.is_dir() {
@@ -1241,7 +1299,7 @@ pub async fn read_screen_file(
     let root = ensure_project(&project_state)?;
     let file_path = root
         .join("screens")
-        .join(&screen_name)
+        .join(go_ident(&screen_name))
         .join(&filename);
 
     std::fs::read_to_string(&file_path)
@@ -1259,7 +1317,7 @@ pub async fn save_screen_file(
     let root = ensure_project(&project_state)?;
     let file_path = root
         .join("screens")
-        .join(&screen_name)
+        .join(go_ident(&screen_name))
         .join(&filename);
 
     std::fs::write(&file_path, &source)
@@ -1710,22 +1768,7 @@ fn build_system_prompt(
         ctx
     };
 
-    // Only screen nodes are supported now (action node type was removed)
-    format!(
-            "You are an expert Go developer EDITING an existing screen file for a Bubble Tea application.\n\
-             CRITICAL RULES:\n\
-             1. You are EDITING the existing file `{target_file}` in package `{name}`. You will receive its current code below.\n\
-             2. The package MUST remain `package {name}`.\n\
-             3. DO NOT write a `func main()`. This file is imported as a library.\n\
-             4. DO NOT try to route to other screens or import other screens.\n\
-             5. If the user asks to navigate, return `feralkit.EmitEvent(\"event_name\")` and the visual node editor will handle the routing.\n\
-             6. Return ONLY valid Go code inside a markdown code block (```go). No explanations.\n\
-             7. PRESERVE the existing code structure, types, functions, imports, and functionality. Only modify what is necessary to fulfill the user's request.\n\
-             8. Output the COMPLETE modified file — do not use placeholders or comments like \"rest of code here\".{context}",
-            name = screen_name,
-            target_file = target_file,
-            context = context_section,
-        )
+    framework::ai_system_prompt(Framework::Charm, screen_name, target_file, &context_section)
 }
 
 #[tauri::command]
@@ -1785,6 +1828,7 @@ pub async fn generate_screen_code(
     };
 
     let root = ensure_project(&project_state)?;
+    let screen_name = go_ident(&screen_name);
     let screen_dir = root.join("screens").join(&screen_name);
 
     // ── Step 1: Enumerate files in the screen package ──────────────────
@@ -2001,8 +2045,10 @@ pub async fn generate_screen_code(
 
         // Spawn new binary
         let mut cmd = CommandBuilder::new(&binary_path);
-        cmd.env("TERM", "xterm-256color");
+        cmd.env("TERM", "tmux-256color");
         cmd.env("LANG", "en_US.UTF-8");
+        cmd.env("COLORFGBG", "15;0");
+        cmd.env("COLORTERM", "truecolor");
 
         crate::spawn_pty_with_command(node_id, cmd, &app, &pty_state)?;
 

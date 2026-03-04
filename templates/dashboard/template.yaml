@@ -1,6 +1,7 @@
 name: Dashboard
-category: Data Views
+category: Layout
 description: Multi-panel data dashboard with styled UI
+framework: charm
 outputs:
   - quit
   - refresh

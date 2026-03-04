@@ -1,0 +1,6 @@
+name: Realtime
+category: Networking
+description: Real-time updates with background messages
+framework: charm
+outputs:
+  - quit

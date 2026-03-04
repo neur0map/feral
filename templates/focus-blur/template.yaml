@@ -1,0 +1,6 @@
+name: Focus & Blur
+category: System
+description: Detect terminal focus and blur events
+framework: charm
+outputs:
+  - quit

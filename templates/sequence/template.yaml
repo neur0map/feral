@@ -1,0 +1,7 @@
+name: Sequence
+category: Patterns
+description: Sequential command execution demo
+framework: charm
+outputs:
+  - done
+  - quit

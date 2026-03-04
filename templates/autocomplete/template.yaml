@@ -1,0 +1,7 @@
+name: Autocomplete
+category: Inputs
+description: Text input with autocomplete suggestions
+framework: charm
+outputs:
+  - submit
+  - quit

@@ -1,0 +1,6 @@
+name: Tabs
+category: Navigation
+description: Tab switcher with keyboard navigation
+framework: charm
+outputs:
+  - quit

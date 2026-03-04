@@ -1,0 +1,6 @@
+name: Space
+category: Patterns
+description: Desktop-style space with floating elements
+framework: charm
+outputs:
+  - quit

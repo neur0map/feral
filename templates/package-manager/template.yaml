@@ -1,0 +1,7 @@
+name: Package Manager
+category: Patterns
+description: Simulated package install with progress
+framework: charm
+outputs:
+  - done
+  - quit

@@ -1,0 +1,7 @@
+name: Default List
+category: Lists & Tables
+description: Bubbles list component with filtering
+framework: charm
+outputs:
+  - select
+  - quit

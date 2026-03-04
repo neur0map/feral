@@ -1,0 +1,6 @@
+name: Window Size
+category: System
+description: Display terminal window dimensions
+framework: charm
+outputs:
+  - quit

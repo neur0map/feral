@@ -23,13 +23,16 @@
 //   is required so the child process believes it's connected to a terminal.
 // ============================================================================
 
+mod framework;
 mod project;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::mpsc;
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 // Re-export notify for use in project.rs
@@ -141,19 +144,55 @@ pub(crate) fn spawn_pty_with_command(
         );
     }
 
-    // ── Background reader thread ────────────────────────────────────────
+    // ── Background reader threads (batched output) ────────────────────
+    //
+    // Two threads form a producer/consumer pair:
+    //   Inner thread: blocking reads from PTY → sends chunks via mpsc
+    //   Outer thread: recv_timeout(32ms) accumulates chunks, flushes once per frame
+    //
+    // This prevents partial-frame renders where the frontend gets half a
+    // Bubble Tea draw and repaints mid-sequence.
+
     let output_event = format!("terminal-output-{id}");
     let feral_event = format!("terminal-event-{id}");
     let terminal_id = id.clone();
     let app_clone = app.clone();
 
+    let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
+
+    // ── Inner thread: blocking PTY reads → channel ──────────────────
     std::thread::spawn(move || {
         let mut reader = reader;
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 16384]; // 16KB buffer
 
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
+                    // EOF — signal the outer thread
+                    let _ = tx.send(None);
+                    break;
+                }
+                Ok(n) => {
+                    let _ = tx.send(Some(buf[..n].to_vec()));
+                }
+                Err(_) => {
+                    let _ = tx.send(None);
+                    break;
+                }
+            }
+        }
+    });
+
+    // ── Outer thread: batch + emit ──────────────────────────────────
+    std::thread::spawn(move || {
+        let batch_window = Duration::from_millis(32);
+
+        loop {
+            // Block until first chunk arrives (or EOF).
+            let first = match rx.recv() {
+                Ok(Some(chunk)) => chunk,
+                _ => {
+                    // EOF or channel closed — emit exit sentinel and stop.
                     let _ = app_clone.emit(
                         &output_event,
                         TerminalOutput {
@@ -162,34 +201,83 @@ pub(crate) fn spawn_pty_with_command(
                     );
                     break;
                 }
-                Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
+            };
 
-                    // Scan for feralkit event markers in the PTY output.
-                    // The harness writes "[feral:event:{name}]" to stderr,
-                    // which the PTY merges into the output stream.
-                    if let Some(start) = data.find("[feral:event:") {
-                        let after = &data[start + 13..]; // skip "[feral:event:"
-                        if let Some(end) = after.find(']') {
-                            let event_name = after[..end].to_string();
-                            let _ = app_clone.emit(
-                                &feral_event,
-                                TerminalEvent { event: event_name },
-                            );
-                        }
+            // Accumulate more chunks within the batch window.
+            let mut batch = first;
+            loop {
+                match rx.recv_timeout(batch_window) {
+                    Ok(Some(chunk)) => batch.extend_from_slice(&chunk),
+                    Ok(None) => {
+                        // EOF mid-batch — flush remaining then exit.
+                        emit_with_event_scan(
+                            &app_clone,
+                            &output_event,
+                            &feral_event,
+                            &batch,
+                        );
+                        let _ = app_clone.emit(
+                            &output_event,
+                            TerminalOutput {
+                                data: "\r\n\x1b[90m[process exited]\x1b[0m\r\n".to_string(),
+                            },
+                        );
+                        return; // exit the outer thread
                     }
-
-                    let _ = app_clone.emit(&output_event, TerminalOutput { data });
-                }
-                Err(e) => {
-                    eprintln!("[feral] PTY read error for {terminal_id}: {e}");
-                    break;
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
+
+            emit_with_event_scan(&app_clone, &output_event, &feral_event, &batch);
         }
+
+        eprintln!("[feral] PTY reader done for {terminal_id}");
     });
 
     Ok(())
+}
+
+/// DEC private mode 2026 (synchronized output) escape sequences.
+/// Wrapping PTY output with these tells xterm.js v6+ to suppress rendering
+/// until the full frame is ready, eliminating flicker from partial repaints.
+/// Bubble Tea v1 does NOT emit these itself — we inject them here.
+const SYNC_START: &str = "\x1b[?2026h";
+const SYNC_END: &str = "\x1b[?2026l";
+
+/// Emit accumulated PTY output to the frontend, scanning for feralkit event
+/// markers (`[feral:event:{name}]`) along the way.
+///
+/// The output is wrapped in DEC mode 2026 (synchronized output) so xterm.js v6
+/// suppresses rendering until the entire batch is written, preventing visible
+/// intermediate states (cursor hidden, lines partially rewritten) that cause
+/// flicker during rapid Bubble Tea TUI repaints.
+fn emit_with_event_scan(
+    app: &AppHandle,
+    output_event: &str,
+    feral_event: &str,
+    raw: &[u8],
+) {
+    let data = String::from_utf8_lossy(raw).to_string();
+
+    // Scan for feralkit event markers in the PTY output.
+    // The harness writes "[feral:event:{name}]" to stderr,
+    // which the PTY merges into the output stream.
+    let mut search_from = 0;
+    while let Some(offset) = data[search_from..].find("[feral:event:") {
+        let start = search_from + offset + 13; // skip "[feral:event:"
+        if let Some(end) = data[start..].find(']') {
+            let event_name = data[start..start + end].to_string();
+            let _ = app.emit(feral_event, TerminalEvent { event: event_name });
+            search_from = start + end + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Wrap in synchronized output markers so xterm.js renders atomically.
+    let wrapped = format!("{SYNC_START}{data}{SYNC_END}");
+    let _ = app.emit(output_event, TerminalOutput { data: wrapped });
 }
 
 // ── Tauri Commands ──────────────────────────────────────────────────────────
@@ -309,6 +397,7 @@ pub fn run() {
             project::save_settings,
             project::load_settings,
             project::spawn_coder_terminal,
+            project::get_coder_context,
             project::list_screen_files,
             project::read_screen_file,
             project::save_screen_file,

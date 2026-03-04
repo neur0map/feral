@@ -4,36 +4,11 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { type NodeProps, NodeResizer } from "@xyflow/react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
+import type { Terminal } from "@xterm/xterm";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { createTerminal, createWriteCoalescer, disposeTerminal } from "@/lib/terminal";
 import "@xterm/xterm/css/xterm.css";
-
-const XTERM_THEME = {
-  background: "#121213",
-  foreground: "#d4d4d8",
-  cursor: "#d4d4d8",
-  cursorAccent: "#121213",
-  selectionBackground: "rgba(255, 255, 255, 0.15)",
-  selectionForeground: "#ffffff",
-  black: "#1a1a24",
-  red: "#f87171",
-  green: "#4ade80",
-  yellow: "#fbbf24",
-  blue: "#60a5fa",
-  magenta: "#c084fc",
-  cyan: "#22d3ee",
-  white: "#d4d4d8",
-  brightBlack: "#3f3f50",
-  brightRed: "#fca5a5",
-  brightGreen: "#86efac",
-  brightYellow: "#fde68a",
-  brightBlue: "#93c5fd",
-  brightMagenta: "#d8b4fe",
-  brightCyan: "#67e8f9",
-  brightWhite: "#fafafa",
-};
 
 export function RunnerNode({ id, selected, data }: NodeProps) {
   const nodeData = data as Record<string, unknown>;
@@ -56,21 +31,11 @@ export function RunnerNode({ id, selected, data }: NodeProps) {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const term = new Terminal({
-      theme: XTERM_THEME,
-      fontSize: 13,
-      fontFamily: '"SF Mono", Menlo, Monaco, "Courier New", monospace',
-      lineHeight: 1.2,
-      cursorBlink: true,
-      cursorStyle: "bar",
-      allowProposedApi: true,
-      smoothScrollDuration: 100,
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerRef.current);
+    const { term, fitAddon } = createTerminal(containerRef.current, "runner");
     terminalRef.current = term;
+
+    // Coalesced write: batches all Tauri events within a single rAF frame
+    const coalescedWrite = createWriteCoalescer(term);
 
     requestAnimationFrame(() => {
       fitAddon.fit();
@@ -89,10 +54,10 @@ export function RunnerNode({ id, selected, data }: NodeProps) {
       });
     }
 
-    // Listen for PTY output
+    // Listen for PTY output — uses coalesced writes to avoid flicker
     let unlistenOutput: UnlistenFn | null = null;
     listen<{ data: string }>(`terminal-output-${id}`, (event) => {
-      term.write(event.payload.data);
+      coalescedWrite(event.payload.data);
     }).then((fn) => {
       unlistenOutput = fn;
     });
@@ -102,9 +67,20 @@ export function RunnerNode({ id, selected, data }: NodeProps) {
       invoke("write_to_terminal", { id, data }).catch(console.error);
     });
 
-    // ResizeObserver
+    // ResizeObserver — 150ms debounce to avoid SIGWINCH floods during layout.
+    // Pixel-dimension guard prevents fit() → reflow → ResizeObserver loop.
     let resizeTimeout: ReturnType<typeof setTimeout>;
-    const observer = new ResizeObserver(() => {
+    let lastPxW = 0;
+    let lastPxH = 0;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) {
+        const w = Math.round(rect.width);
+        const h = Math.round(rect.height);
+        if (w === lastPxW && h === lastPxH) return;
+        lastPxW = w;
+        lastPxH = h;
+      }
       clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
         fitAddon.fit();
@@ -116,7 +92,7 @@ export function RunnerNode({ id, selected, data }: NodeProps) {
           lastDims.current = { cols, rows };
           invoke("resize_terminal", { id, cols, rows }).catch(console.error);
         }
-      }, 50);
+      }, 150);
     });
 
     if (containerRef.current) {
@@ -128,7 +104,7 @@ export function RunnerNode({ id, selected, data }: NodeProps) {
       observer.disconnect();
       dataDisposable.dispose();
       if (unlistenOutput) unlistenOutput();
-      term.dispose();
+      disposeTerminal(term);
       invoke("kill_terminal", { id }).catch(console.error);
     };
   }, [id, edgesJson, startScreen]);

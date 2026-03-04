@@ -1,0 +1,6 @@
+name: Doom Fire
+category: System
+description: Classic Doom fire effect animation
+framework: charm
+outputs:
+  - quit

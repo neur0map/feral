@@ -1,0 +1,6 @@
+name: Help
+category: Navigation
+description: Help view with keybinding documentation
+framework: charm
+outputs:
+  - quit

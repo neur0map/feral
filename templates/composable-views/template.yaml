@@ -1,0 +1,6 @@
+name: Composable Views
+category: Navigation
+description: Composable sub-models with tab switching
+framework: charm
+outputs:
+  - quit

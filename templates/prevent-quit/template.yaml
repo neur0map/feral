@@ -1,0 +1,6 @@
+name: Prevent Quit
+category: Patterns
+description: Confirmation dialog before quitting
+framework: charm
+outputs:
+  - quit

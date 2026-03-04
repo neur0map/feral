@@ -9,39 +9,13 @@ import {
   Handle,
   Position,
 } from "@xyflow/react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { TerminalSquare } from "lucide-react";
+import { TerminalSquare, ClipboardCopy, Check } from "lucide-react";
+import { createTerminal, createWriteCoalescer, disposeTerminal } from "@/lib/terminal";
 import "@xterm/xterm/css/xterm.css";
-
-// ── Xterm theme (matches TerminalNode) ──────────────────────────────────────
-
-const XTERM_THEME = {
-  background: "#121213",
-  foreground: "#d4d4d8",
-  cursor: "#d4d4d8",
-  cursorAccent: "#121213",
-  selectionBackground: "rgba(255, 255, 255, 0.15)",
-  selectionForeground: "#ffffff",
-  black: "#1a1a1c",
-  red: "#f87171",
-  green: "#4ade80",
-  yellow: "#fbbf24",
-  blue: "#60a5fa",
-  magenta: "#c084fc",
-  cyan: "#22d3ee",
-  white: "#d4d4d8",
-  brightBlack: "#3f3f44",
-  brightRed: "#fca5a5",
-  brightGreen: "#86efac",
-  brightYellow: "#fde68a",
-  brightBlue: "#93c5fd",
-  brightMagenta: "#d8b4fe",
-  brightCyan: "#67e8f9",
-  brightWhite: "#fafafa",
-};
 
 // ── Component ───────────────────────────────────────────────────────────────
 
@@ -49,12 +23,14 @@ export function CoderNode({ id, selected, data }: NodeProps) {
   const nodeData = data as Record<string, unknown>;
   const targetScreenName = (nodeData.targetScreenName as string) ?? "";
   const screenNodeId = (nodeData.screenNodeId as string) ?? "";
+  const coderId = (nodeData.coderId as string) ?? "claude";
 
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [copied, setCopied] = useState(false);
   const lastDims = useRef<{ cols: number; rows: number }>({ cols: 80, rows: 24 });
 
   // Track connection state
@@ -62,27 +38,35 @@ export function CoderNode({ id, selected, data }: NodeProps) {
     setIsConnected(!!targetScreenName);
   }, [targetScreenName]);
 
+  // Copy context prompt to clipboard
+  // Paste context prompt directly into the coder's PTY
+  // Flatten to a single line so the PTY doesn't treat newlines as Enter keypresses
+  const handlePasteContext = useCallback(async () => {
+    if (!targetScreenName) return;
+    try {
+      const prompt = await invoke<string>("get_coder_context", {
+        screenName: targetScreenName,
+      });
+      const flat = prompt.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+      await invoke("write_to_terminal", { id, data: flat + "\n" });
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      console.error("[Feral] Failed to paste context:", err);
+    }
+  }, [id, targetScreenName]);
+
   // ── Main effect: wire up xterm + PTY ──────────────────────────────────
   useEffect(() => {
     if (!containerRef.current || !isConnected || !targetScreenName) return;
 
-    const term = new Terminal({
-      theme: XTERM_THEME,
-      fontSize: 13,
-      fontFamily: '"SF Mono", Menlo, Monaco, "Courier New", monospace',
-      lineHeight: 1.2,
-      cursorBlink: true,
-      cursorStyle: "bar",
-      allowProposedApi: true,
-      smoothScrollDuration: 100,
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerRef.current);
+    const { term, fitAddon } = createTerminal(containerRef.current, "coder");
 
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
+
+    // Coalesced write: batches all Tauri events within a single rAF frame
+    const coalescedWrite = createWriteCoalescer(term);
 
     requestAnimationFrame(() => {
       fitAddon.fit();
@@ -93,14 +77,15 @@ export function CoderNode({ id, selected, data }: NodeProps) {
       nodeId: id,
       screenName: targetScreenName,
       screenNodeId: screenNodeId || null,
+      coderId: coderId,
     }).catch((err) => {
       term.write(`\r\n\x1b[31m[Feral] Failed to spawn terminal: ${err}\x1b[0m\r\n`);
     });
 
-    // Listen for PTY output
+    // Listen for PTY output — uses coalesced writes to avoid flicker
     let unlistenOutput: UnlistenFn | null = null;
     listen<{ data: string }>(`terminal-output-${id}`, (event) => {
-      term.write(event.payload.data);
+      coalescedWrite(event.payload.data);
     }).then((fn) => {
       unlistenOutput = fn;
     });
@@ -110,9 +95,20 @@ export function CoderNode({ id, selected, data }: NodeProps) {
       invoke("write_to_terminal", { id, data }).catch(console.error);
     });
 
-    // ResizeObserver
+    // ResizeObserver — 150ms debounce to avoid SIGWINCH floods during layout.
+    // Pixel-dimension guard prevents fit() → reflow → ResizeObserver loop.
     let resizeTimeout: ReturnType<typeof setTimeout>;
-    const observer = new ResizeObserver(() => {
+    let lastPxW = 0;
+    let lastPxH = 0;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) {
+        const w = Math.round(rect.width);
+        const h = Math.round(rect.height);
+        if (w === lastPxW && h === lastPxH) return;
+        lastPxW = w;
+        lastPxH = h;
+      }
       clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
         fitAddon.fit();
@@ -121,7 +117,7 @@ export function CoderNode({ id, selected, data }: NodeProps) {
           lastDims.current = { cols, rows };
           invoke("resize_terminal", { id, cols, rows }).catch(console.error);
         }
-      }, 50);
+      }, 150);
     });
 
     if (containerRef.current) {
@@ -133,10 +129,10 @@ export function CoderNode({ id, selected, data }: NodeProps) {
       observer.disconnect();
       dataDisposable.dispose();
       if (unlistenOutput) unlistenOutput();
-      term.dispose();
+      disposeTerminal(term);
       invoke("kill_terminal", { id }).catch(console.error);
     };
-  }, [id, isConnected, targetScreenName, screenNodeId]);
+  }, [id, isConnected, targetScreenName, screenNodeId, coderId]);
 
   // ── Click-to-focus handler ────────────────────────────────────────────
   const handleTerminalClick = useCallback(() => {
@@ -171,8 +167,20 @@ export function CoderNode({ id, selected, data }: NodeProps) {
         <div className="coder-header">
           <TerminalSquare size={14} className="text-amber-400/80" />
           <span className="coder-title">
-            {targetScreenName ? `Coder → ${targetScreenName}` : "Coder"}
+            {targetScreenName
+              ? `${coderId.charAt(0).toUpperCase() + coderId.slice(1)} → ${targetScreenName}`
+              : coderId.charAt(0).toUpperCase() + coderId.slice(1)}
           </span>
+          {isConnected && (
+            <button
+              className="coder-context-btn"
+              onClick={handlePasteContext}
+              title="Paste the screen's source code as context into the coder's terminal"
+            >
+              {copied ? <Check size={12} /> : <ClipboardCopy size={12} />}
+              <span>{copied ? "Sent" : "Context"}</span>
+            </button>
+          )}
         </div>
 
         {/* Body */}

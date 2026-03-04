@@ -1,0 +1,6 @@
+name: Pager
+category: Navigation
+description: Scrollable text viewport
+framework: charm
+outputs:
+  - quit

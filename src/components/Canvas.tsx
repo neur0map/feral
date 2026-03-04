@@ -1,5 +1,5 @@
 // ============================================================================
-// Canvas.tsx — Full-screen React Flow canvas with template sidebar
+// Canvas.tsx — Full-screen React Flow canvas with template gallery
 // ============================================================================
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -26,7 +26,7 @@ import { RunnerNode } from "./RunnerNode";
 import { PromptNode } from "./PromptNode";
 import { CoderNode } from "./CoderNode";
 import { Toolbar } from "./Toolbar";
-import { TemplateSidebar } from "./TemplateSidebar";
+import { TemplateGallery } from "./TemplateGallery";
 import { SettingsDialog } from "./SettingsDialog";
 
 const nodeTypes = {
@@ -45,6 +45,7 @@ export function Canvas() {
   const [graphLoaded, setGraphLoaded] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
 
   // ── Boot: load saved graph ──────────────────────────────────────────────
   useEffect(() => {
@@ -166,7 +167,7 @@ export function Canvas() {
   );
 
   const addScreenNode = useCallback(
-    (templateId: string, screenName: string, outputs: string[]) => {
+    (templateId: string, screenName: string, outputs: string[], framework: string) => {
       const id = crypto.randomUUID();
 
       let position = {
@@ -188,8 +189,8 @@ export function Canvas() {
         id,
         type: "screen",
         position,
-        data: { screenName, templateId, outputs },
-        style: { width: 640, height: 420 },
+        data: { screenName, templateId, outputs, framework },
+        style: { width: 900, height: 550 },
       };
 
       setNodes((nds) => [...nds, newNode]);
@@ -223,7 +224,7 @@ export function Canvas() {
   }, [setNodes]);
 
   // ── Add coder node ───────────────────────────────────────────────────
-  const addCoderNode = useCallback(() => {
+  const addCoderNode = useCallback((coderId?: string) => {
     const id = crypto.randomUUID();
 
     let position = { x: 100, y: 100 };
@@ -240,7 +241,7 @@ export function Canvas() {
       id,
       type: "coder",
       position,
-      data: { targetScreenName: "" },
+      data: { targetScreenName: "", coderId: coderId ?? "claude" },
       style: { width: 640, height: 420 },
     };
 
@@ -389,13 +390,18 @@ export function Canvas() {
           onEjectCode={handleEjectCode}
           onAddPrompt={addPromptNode}
           onAddCoder={addCoderNode}
+          onOpenTemplates={() => setTemplatesOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
           canRun={canRun}
           justSaved={justSaved}
         />
       </div>
 
-      <TemplateSidebar onSpawn={addScreenNode} />
+      <TemplateGallery
+        open={templatesOpen}
+        onClose={() => setTemplatesOpen(false)}
+        onSpawn={addScreenNode}
+      />
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}

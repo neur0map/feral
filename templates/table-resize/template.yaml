@@ -1,0 +1,6 @@
+name: Resizable Table
+category: Lists & Tables
+description: Responsive table that adapts to terminal width
+framework: charm
+outputs:
+  - quit

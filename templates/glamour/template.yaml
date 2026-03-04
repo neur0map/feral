@@ -1,0 +1,6 @@
+name: Glamour
+category: System
+description: Markdown rendering in the terminal
+framework: charm
+outputs:
+  - quit

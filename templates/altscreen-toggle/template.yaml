@@ -1,0 +1,6 @@
+name: Altscreen Toggle
+category: Layout
+description: Toggle between alternate screen and inline mode
+framework: charm
+outputs:
+  - quit

@@ -1,0 +1,6 @@
+name: Mouse
+category: System
+description: Mouse event tracking and display
+framework: charm
+outputs:
+  - quit

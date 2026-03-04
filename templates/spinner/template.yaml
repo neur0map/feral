@@ -1,0 +1,6 @@
+name: Spinner
+category: Feedback
+description: Animated spinner with multiple styles
+framework: charm
+outputs:
+  - quit

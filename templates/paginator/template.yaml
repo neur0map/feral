@@ -1,0 +1,6 @@
+name: Paginator
+category: Navigation
+description: Paginated list with dot indicators
+framework: charm
+outputs:
+  - quit

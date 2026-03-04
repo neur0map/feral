@@ -1,0 +1,6 @@
+name: Spinners
+category: Feedback
+description: Gallery of all available spinner styles
+framework: charm
+outputs:
+  - quit

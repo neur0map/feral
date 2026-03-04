@@ -1,0 +1,7 @@
+name: File Picker
+category: System
+description: File system browser with file selection
+framework: charm
+outputs:
+  - select
+  - quit

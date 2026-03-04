@@ -1,0 +1,7 @@
+name: Text Inputs
+category: Inputs
+description: Multiple styled text inputs in a form
+framework: charm
+outputs:
+  - submit
+  - quit

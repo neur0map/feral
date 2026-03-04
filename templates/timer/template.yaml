@@ -1,0 +1,7 @@
+name: Timer
+category: Feedback
+description: Countdown timer with start/stop/reset
+framework: charm
+outputs:
+  - timeout
+  - quit

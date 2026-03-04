@@ -1,6 +1,7 @@
 name: Navigation Menu
-category: Menus
+category: Navigation
 description: Arrow-key menu that emits events on select
+framework: charm
 outputs:
   - start
   - settings

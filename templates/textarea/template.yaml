@@ -1,0 +1,6 @@
+name: Text Area
+category: Inputs
+description: Multi-line text editor with placeholder
+framework: charm
+outputs:
+  - quit

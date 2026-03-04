@@ -1,0 +1,7 @@
+name: Simple List
+category: Lists & Tables
+description: Simple list with arrow key navigation
+framework: charm
+outputs:
+  - select
+  - quit

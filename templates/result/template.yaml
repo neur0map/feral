@@ -1,0 +1,6 @@
+name: Selection Result
+category: Getting Started
+description: Choice picker that displays a selection result
+framework: charm
+outputs:
+  - quit

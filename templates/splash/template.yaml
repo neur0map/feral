@@ -1,6 +1,7 @@
 name: Splash Screen
-category: Splash Screens
+category: Getting Started
 description: Centered title card with quit handler
+framework: charm
 outputs:
   - proceed
   - quit

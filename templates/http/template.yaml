@@ -1,0 +1,7 @@
+name: HTTP
+category: Networking
+description: HTTP request with loading spinner
+framework: charm
+outputs:
+  - done
+  - quit

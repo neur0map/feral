@@ -1,0 +1,6 @@
+name: Fullscreen
+category: Layout
+description: Fullscreen TUI with centered content
+framework: charm
+outputs:
+  - quit

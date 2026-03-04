@@ -1,0 +1,6 @@
+name: Stopwatch
+category: Feedback
+description: Interactive stopwatch with start/stop/reset
+framework: charm
+outputs:
+  - quit

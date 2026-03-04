@@ -1,0 +1,7 @@
+name: Progress Animated
+category: Feedback
+description: Progress bar with smooth animation
+framework: charm
+outputs:
+  - done
+  - quit

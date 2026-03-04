@@ -1,0 +1,7 @@
+name: Text Input
+category: Inputs
+description: Single text input field with placeholder
+framework: charm
+outputs:
+  - submit
+  - quit

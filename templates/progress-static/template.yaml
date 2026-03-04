@@ -1,0 +1,6 @@
+name: Progress Static
+category: Feedback
+description: Static progress bar controlled by keyboard
+framework: charm
+outputs:
+  - quit

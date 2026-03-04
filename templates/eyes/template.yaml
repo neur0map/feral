@@ -1,0 +1,6 @@
+name: Eyes
+category: System
+description: ASCII eyes that follow the cursor
+framework: charm
+outputs:
+  - quit

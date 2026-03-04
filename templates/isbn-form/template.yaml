@@ -1,0 +1,7 @@
+name: ISBN Form
+category: Inputs
+description: Multi-step form with validation
+framework: charm
+outputs:
+  - submit
+  - quit

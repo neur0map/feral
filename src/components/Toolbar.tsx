@@ -2,13 +2,23 @@
 // Toolbar.tsx — Floating macOS-style toolbar with actions
 // ============================================================================
 
-import { Zap, Play, Download, Check, Settings as SettingsIcon, Sparkles, TerminalSquare } from "lucide-react";
+import { Zap, Play, Download, Check, Settings as SettingsIcon, Sparkles, TerminalSquare, ChevronDown, Blocks } from "lucide-react";
+
+const CODER_OPTIONS = [
+  { id: "claude",   label: "Claude",   accent: "#d4a27a" },
+  { id: "codex",    label: "Codex",    accent: "#4ade80" },
+  { id: "gemini",   label: "Gemini",   accent: "#60a5fa" },
+  { id: "droid",    label: "Droid",    accent: "#c084fc" },
+  { id: "kilo",     label: "Kilo",     accent: "#fbbf24" },
+  { id: "opencode", label: "OpenCode", accent: "#22d3ee" },
+] as const;
 
 interface ToolbarProps {
   onRunApp: () => void;
   onEjectCode: () => void;
   onAddPrompt: () => void;
-  onAddCoder: () => void;
+  onAddCoder: (coderId?: string) => void;
+  onOpenTemplates: () => void;
   onOpenSettings: () => void;
   canRun: boolean;
   justSaved: boolean;
@@ -19,6 +29,7 @@ export function Toolbar({
   onEjectCode,
   onAddPrompt,
   onAddCoder,
+  onOpenTemplates,
   onOpenSettings,
   canRun,
   justSaved,
@@ -39,6 +50,16 @@ export function Toolbar({
       {/* Divider */}
       <div className="toolbar-divider" />
 
+      {/* Open template gallery */}
+      <button
+        className="toolbar-button"
+        onClick={onOpenTemplates}
+        title="Browse templates"
+      >
+        <Blocks size={12} />
+        <span>Templates</span>
+      </button>
+
       {/* Add AI Prompt node */}
       <button
         className="toolbar-button"
@@ -49,15 +70,36 @@ export function Toolbar({
         <span>AI</span>
       </button>
 
-      {/* Add Coder node */}
-      <button
-        className="toolbar-button"
-        onClick={onAddCoder}
-        title="Add coder terminal node"
-      >
-        <TerminalSquare size={12} />
-        <span>Coder</span>
-      </button>
+      {/* Add Coder node — with hover dropdown */}
+      <div className="toolbar-dropdown-wrapper">
+        <button
+          className="toolbar-button"
+          onClick={() => onAddCoder()}
+          title="Add coder terminal node"
+        >
+          <TerminalSquare size={12} />
+          <span>Coder</span>
+          <ChevronDown size={10} className="toolbar-dropdown-chevron" />
+        </button>
+
+        <div className="toolbar-dropdown">
+          <div className="toolbar-dropdown-menu">
+            {CODER_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                className="toolbar-dropdown-item"
+                onClick={() => onAddCoder(opt.id)}
+              >
+                <span
+                  className="toolbar-dropdown-dot"
+                  style={{ background: opt.accent }}
+                />
+                <span>{opt.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
 
       {/* Run button */}
       <button

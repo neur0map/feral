@@ -1,0 +1,7 @@
+name: Simple Choice Picker
+category: Getting Started
+description: Simple choice picker with arrow navigation
+framework: charm
+outputs:
+  - select
+  - quit

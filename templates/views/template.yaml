@@ -1,0 +1,6 @@
+name: Views
+category: Navigation
+description: Multi-view app with choices and progress
+framework: charm
+outputs:
+  - quit

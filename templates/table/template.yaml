@@ -1,0 +1,6 @@
+name: Table
+category: Lists & Tables
+description: Sortable table with city population data
+framework: charm
+outputs:
+  - quit

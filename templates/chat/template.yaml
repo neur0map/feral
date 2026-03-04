@@ -1,0 +1,6 @@
+name: Chat
+category: Networking
+description: Simple chat interface with message input
+framework: charm
+outputs:
+  - quit
